@@ -1,48 +1,86 @@
 # 第三课：ROS 架构与通信学习笔记
 
-> 本节使用 ROS 1（Noetic）的命令和写法。学习重点不是背命令，而是先弄清楚：一个程序如何成为节点、节点怎样交换数据、小乌龟为什么会动、出错时应该从哪里查。
+> 课程主题：ROS 1（Noetic）的基本架构、节点与三种通信方式。  
+> 学习目标：不只记住命令，而是能沿着数据流解释“谁产生数据、数据走哪个通道、谁处理数据、结果为什么会发生”。  
+> 说明：小乌龟、节点、话题、服务和参数是课堂主线；线性代数、卡尔曼滤波与 `ros_control` 放在“从课堂到比赛系统”中作为延伸，不把课外内容冒充课堂实验。
 
-## 1. ROS 到底解决什么问题
+## 阅读路线
 
-一台机器人通常同时运行很多程序：相机采图、视觉识别、决策、底盘控制、电机通信等。如果每两个程序都自己约定连接方式，系统会很难维护。ROS 提供了一套统一的通信和管理机制，让不同程序按相同规则交换数据。
+这篇笔记按“先建立整体认识，再拆通信机制，最后连接工程应用”的顺序组织：
 
-我把几个核心概念理解成下面这样：
+1. **先看系统**：ROS 为什么存在，节点之间怎样组成计算图；
+2. **再看完整例子**：从按下方向键到小乌龟运动，中间发生了什么；
+3. **拆开三种通信**：Topic、Service、Parameter 分别解决什么问题；
+4. **落到代码与工程**：一个 C++ 程序怎样成为可运行的 ROS 节点；
+5. **连接比赛系统**：状态向量、卡尔曼滤波和真实机器人控制怎样接入 ROS 数据流；
+6. **形成排错习惯**：按照“节点—连接—类型—数据”逐层定位问题。
 
-| ROS 概念 | 简单理解 | 典型例子 |
-| --- | --- | --- |
-| 节点（Node） | 一个正在运行、负责具体任务的程序 | `/turtlesim`、`/teleop_turtle` |
-| 话题（Topic） | 持续传递数据的频道，发布者和订阅者不必同步等待 | `/turtle1/cmd_vel` |
-| 消息（Message） | 频道中数据的固定格式 | `geometry_msgs/Twist` |
-| 服务（Service） | 一次请求对应一次回答 | `/spawn` 生成新乌龟 |
-| 参数（Parameter） | 运行时配置 | 背景颜色 |
-| Master | 帮节点注册并找到彼此 | `roscore` 启动它 |
+---
 
-ROS 不是代替 Ubuntu 的完整操作系统。它更像运行在 Linux 上的机器人软件中间件、工具链和生态。
+## 模块一：先从整体上理解 ROS
 
-## 2. 先看完整例子：小乌龟为什么会动
+### 1. ROS 解决的不是“写一个程序”，而是“让很多程序协作”
 
-课堂上用键盘控制小乌龟时，实际发生的是一条完整的数据链：
+一台机器人通常同时运行相机驱动、目标识别、状态估计、决策、底盘控制和电机通信等程序。如果这些程序两两直接耦合，那么更换相机、修改控制器或增加一个调试工具，都可能牵连整个系统。
+
+ROS 提供统一的**命名、发现、通信和工具体系**。每个程序只需要说明自己发布什么、订阅什么或提供什么服务，不必知道对方的内部实现。我的理解是：ROS 最重要的价值不是某一条命令，而是把机器人软件拆成边界清楚、可以替换和调试的模块。
 
 ```mermaid
 flowchart TD
-    A[按下方向键] --> B[turtle_teleop_key 读取按键]
-    B --> C[向 /turtle1/cmd_vel 发布 Twist]
-    C --> D[/turtlesim 节点订阅消息]
-    D --> E[更新速度和位姿]
-    E --> F[重绘小乌龟并发布 /turtle1/pose]
+    A["传感器节点\n产生原始数据"] --> B["感知节点\n提取目标信息"]
+    B --> C["估计与决策节点\n形成状态和目标"]
+    C --> D["控制节点\n计算控制量"]
+    D --> E["硬件接口\n驱动执行器"]
+    E --> A
 ```
 
-关键点：方向键不是直接控制屏幕上的乌龟。键盘节点先把“想要的线速度和角速度”写进消息，再由 turtlesim 节点接收和处理。
+### 2. 六个最容易混淆的概念
 
-### 2.1 三个终端完成演示
+| 概念 | 它是什么 | 课堂中的例子 | 需要记住的重点 |
+| --- | --- | --- | --- |
+| Package（包） | 组织源码、配置和依赖的工程单位 | `turtlesim` | 一个包里可以有多个可执行程序 |
+| Executable（可执行文件） | 编译后真正被系统启动的程序 | `turtlesim_node` | 它的名字不一定等于节点名 |
+| Node（节点） | 一个加入 ROS 计算图的运行中进程 | `/turtlesim` | 节点名是它在 ROS 图中的身份 |
+| Topic（话题） | 持续传输消息的数据通道 | `/turtle1/cmd_vel` | 发布者和订阅者通过名字与类型匹配 |
+| Message（消息） | 话题中每一份数据的结构 | `geometry_msgs/Twist` | 类型相同才知道各字段怎样解释 |
+| Service（服务） | 一次请求对应一次响应 | `/spawn` | 适合需要明确结果的一次性操作 |
 
-终端 1：启动 ROS Master。
+Parameter（参数）也属于 ROS 的基础设施，但它主要保存配置，不负责传输连续数据。
+
+以命令 `rosrun turtlesim turtlesim_node` 为例：
+
+- 第一个 `turtlesim` 是包名；
+- 第二个 `turtlesim_node` 是包中的可执行文件名；
+- 程序运行后默认注册成节点 `/turtlesim`。
+
+### 3. `roscore` 和 Master 到底做什么
+
+运行：
 
 ```bash
 roscore
 ```
 
-终端 2：启动仿真窗口。
+会启动 ROS Master、参数服务器以及日志相关组件。节点启动后先向 Master 注册自己的名字、话题、服务和通信地址。订阅者通过 Master 找到发布者后，双方再建立点对点连接，大部分话题数据并不由 Master 逐条转发。
+
+因此可以把 Master 理解为“登记处和介绍人”，而不是“所有消息必经的中转站”。这也解释了两个现象：
+
+- 没有 `roscore` 时，新节点通常无法正常注册和互相发现；
+- 节点建立联系后，真正的数据传输主要发生在节点之间。
+
+---
+
+## 模块二：用小乌龟走通一条完整数据链
+
+### 1. 三个终端分别承担什么角色
+
+终端 1：启动 ROS 核心。
+
+```bash
+roscore
+```
+
+终端 2：启动仿真节点。
 
 ```bash
 rosrun turtlesim turtlesim_node
@@ -54,77 +92,112 @@ rosrun turtlesim turtlesim_node
 rosrun turtlesim turtle_teleop_key
 ```
 
-最后要把输入焦点放在终端 3，再按方向键。课堂照片里出现的提示 `Use arrow keys to move the turtle` 就是在说明该终端正在读取按键。
+要把输入焦点放在终端 3，再按方向键。否则按键不会被 `turtle_teleop_key` 读取。三个终端不是重复操作，而是分别运行 Master、被控制对象和控制命令的产生者。
 
-### 2.2 小乌龟内部怎样处理命令
+### 2. “按键以后小乌龟动起来”的内部过程
 
-查看 turtlesim 的官方源代码可以看到，乌龟对象订阅相对名称 `cmd_vel`。它位于 `/turtle1` 命名空间下，所以实际话题名是 `/turtle1/cmd_vel`。
-
-收到 `geometry_msgs/Twist` 后，回调函数读取：
-
-- `linear.x`：前进或后退的线速度；
-- `linear.y`：平面内另一方向的线速度；
-- `angular.z`：绕竖直方向旋转的角速度。
-
-随后更新循环根据速度和时间间隔计算新的位置与朝向，重新绘制小乌龟，并发布 `/turtle1/pose`。官方实现中，如果超过 1 秒没有再收到速度命令，速度会被清零，所以松开按键后乌龟不会一直运动。
-
-这段内部处理把“按键—消息—回调—状态更新—画面变化”连成了完整闭环。
-
-## 3. 不要混淆：包、可执行文件、节点、话题和消息类型
-
-以这条命令为例：
-
-```bash
-rosrun turtlesim turtlesim_node
+```mermaid
+sequenceDiagram
+    participant K as 键盘控制节点
+    participant M as ROS Master
+    participant T as turtlesim 节点
+    K->>M: 注册发布 /turtle1/cmd_vel
+    T->>M: 注册订阅 /turtle1/cmd_vel
+    M-->>T: 告知发布者地址
+    K->>T: 发送 geometry_msgs/Twist
+    T->>T: 更新速度、位姿并重绘
+    T-->>K: 不要求逐条应答
 ```
 
-| 名称 | 本例中的值 | 作用 |
-| --- | --- | --- |
-| 包名 | `turtlesim` | 组织源代码、配置和依赖 |
-| 可执行文件名 | `turtlesim_node` | 被 `rosrun` 找到并启动的程序 |
-| 运行后的节点名 | `/turtlesim` | ROS 计算图中的身份 |
-| 速度话题名 | `/turtle1/cmd_vel` | 数据传输频道 |
-| 速度消息类型 | `geometry_msgs/Twist` | 规定频道中每个字段的结构 |
+完整逻辑是：
 
-因此，可执行文件名和节点名可以不同。排查正在运行的程序时应看节点名，而不是只盯着启动命令。
+1. `turtle_teleop_key` 读取方向键；
+2. 它把运动意图写进 `geometry_msgs/Twist`；
+3. 消息发布到 `/turtle1/cmd_vel`；
+4. `/turtlesim` 节点收到消息后执行回调；
+5. 更新循环根据速度和时间间隔计算新位置与朝向；
+6. 界面重绘，同时发布 `/turtle1/pose`。
 
-### 3.1 查看节点
+方向键并没有直接操作屏幕上的图形。它只是产生一条速度消息，真正改变小乌龟状态的是 `turtlesim` 节点。
+
+### 3. `Twist` 中哪些字段真正影响 turtlesim
+
+先查看消息结构：
+
+```bash
+rosmsg show geometry_msgs/Twist
+```
+
+`Twist` 包含两个三维向量：
+
+```text
+geometry_msgs/Vector3 linear
+geometry_msgs/Vector3 angular
+```
+
+但“消息里存在某个字段”不等于“接收者一定使用它”。查看 turtlesim 的 Noetic 源码可知，它的速度回调读取的是：
+
+- `linear.x`：沿乌龟当前朝向前进或后退；
+- `angular.z`：在二维平面内转向。
+
+`linear.y` 虽然属于 `Twist` 的结构，却不参与 turtlesim 的这段运动处理。这提醒我：理解消息时要同时看**消息定义**和**订阅端怎样使用字段**。
+
+官方实现还会在一段时间没有收到新速度命令后把速度清零。因此松开按键后，小乌龟不会无限保持上一次速度。
+
+### 4. 用 ROS 工具观察这条链路
 
 ```bash
 rosnode list
+rostopic list
 rosnode info /turtlesim
-rosnode ping /turtlesim
+rostopic info /turtle1/cmd_vel
+rostopic type /turtle1/cmd_vel
+rostopic echo /turtle1/pose
+rqt_graph
 ```
 
-- `rosnode list`：有哪些节点正在向 Master 注册；
-- `rosnode info /turtlesim`：该节点发布、订阅了什么，以及提供了哪些服务；
-- `rosnode ping /turtlesim`：节点是否还能响应。
+这些命令从不同角度回答问题：
 
-需要从另一个终端结束节点时，可以使用：
+| 想知道什么 | 使用的命令 |
+| --- | --- |
+| 哪些节点正在运行 | `rosnode list` |
+| 某个节点连接了哪些话题和服务 | `rosnode info /turtlesim` |
+| 系统中有哪些话题 | `rostopic list` |
+| 话题两端是谁、类型是什么 | `rostopic info /turtle1/cmd_vel` |
+| 话题的消息类型 | `rostopic type /turtle1/cmd_vel` |
+| 位姿数据是否真的在更新 | `rostopic echo /turtle1/pose` |
+| 用图观察节点连接关系 | `rqt_graph` |
+
+### 5. 节点的名字与结束方式
 
 ```bash
+rosnode ping /turtlesim
 rosnode kill /turtlesim
 ```
 
-### 3.2 `Ctrl+C` 和 `q` 有什么区别
+- `rosnode ping` 用于检查节点能否响应；
+- `rosnode kill` 通过 ROS 的节点接口请求指定节点关闭；
+- 在终端按 `Ctrl+C`，系统向当前前台进程发送中断信号；
+- `turtle_teleop_key` 中的 `q` 是程序自己定义的退出按键。
 
-- 在 `turtle_teleop_key` 中按 `q`，是程序自己定义的退出按键；
-- 在终端按 `Ctrl+C`，会向当前前台进程发送中断信号；
-- roscpp 收到正常的关闭信号后，`ros::ok()` 会变为 `false`，`ros::spin()` 也会退出，节点可以结束清理工作。
+课堂终端里出现的 `^C` 表示收到了 `Ctrl+C`，不是发给小乌龟的控制消息。对 roscpp 节点而言，正常关闭后 `ros::ok()` 会变为 `false`，`ros::spin()` 也会结束，程序便有机会完成清理。
 
-所以课堂终端里出现的 `^C` 表示终端收到了 `Ctrl+C`，它不是发给小乌龟的运动指令。
+---
 
-## 4. 话题通信：发布者和订阅者怎样配对
+## 模块三：三种通信机制应该怎样选择
 
-话题通信适合连续数据，例如相机图像、雷达数据、位姿和速度指令。发布者只负责发送，订阅者只负责接收；双方能否连接，关键是：
+### 1. Topic：持续的数据流
 
-1. 话题名相同；
-2. 消息类型相同；
-3. 两个节点都已经正常运行并完成注册。
+Topic 适合速度、图像、雷达、位姿等持续产生的数据。它是异步的：发布者发出消息后，不会等待每个订阅者逐条回答。
 
-### 4.1 发布者：每秒发送一次 `hello`
+发布者和订阅者能正确连接，至少需要：
 
-课堂照片中的核心代码可以整理为：
+1. 话题名一致；
+2. 消息类型一致；
+3. 节点已经成功向同一个 Master 注册；
+4. 网络配置允许双方访问彼此公布的地址。
+
+#### 发布者：每秒发布一次 `hello`
 
 ```cpp
 #include <ros/ros.h>
@@ -134,84 +207,59 @@ int main(int argc, char** argv) {
   ros::init(argc, argv, "talker");
   ros::NodeHandle nh;
 
-  ros::Publisher pub = nh.advertise<std_msgs::String>("/chatter", 10);
+  ros::Publisher publisher =
+      nh.advertise<std_msgs::String>("/chatter", 10);
   ros::Rate rate(1);
 
   while (ros::ok()) {
-    std_msgs::String msg;
-    msg.data = "hello";
-    pub.publish(msg);
+    std_msgs::String message;
+    message.data = "hello";
+    publisher.publish(message);
+    ROS_INFO("publish: %s", message.data.c_str());
     rate.sleep();
   }
   return 0;
 }
 ```
 
-逐句理解：
+关键语句的作用：
 
-- `ros::init`：初始化 ROS，并把当前进程注册为名叫 `talker` 的节点；
-- `ros::NodeHandle`：后续创建发布者、订阅者等 ROS 对象的入口；
-- `advertise`：声明要在 `/chatter` 上发布 `std_msgs/String`；
-- `10`：发布队列长度。发送过快、消息来不及处理时，队列满后旧消息可能被丢弃；
-- `ros::Rate(1)`：循环频率为 1 Hz；
-- `publish`：真正把消息发出。
+- `ros::init`：初始化 ROS，默认节点名为 `talker`；
+- `ros::NodeHandle`：创建发布者、订阅者和服务等对象的入口；
+- `advertise<std_msgs::String>`：声明话题和消息类型；
+- `10`：发送队列长度，不是频率；
+- `ros::Rate(1)`：控制循环约为 1 Hz；
+- `publish`：把构造好的消息交给 ROS 发送。
 
-### 4.2 订阅者：收到消息后打印
+#### 订阅者：收到 `hello` 后打印
 
 ```cpp
 #include <ros/ros.h>
 #include <std_msgs/String.h>
 
-void callback(const std_msgs::String::ConstPtr& msg) {
-  ROS_INFO("I heard: %s", msg->data.c_str());
+void callback(const std_msgs::String::ConstPtr& message) {
+  ROS_INFO("I heard: %s", message->data.c_str());
 }
 
 int main(int argc, char** argv) {
   ros::init(argc, argv, "listener");
   ros::NodeHandle nh;
 
-  ros::Subscriber sub = nh.subscribe("/chatter", 10, callback);
+  ros::Subscriber subscriber =
+      nh.subscribe("/chatter", 10, callback);
   ros::spin();
   return 0;
 }
 ```
 
-- `subscribe`：订阅 `/chatter`，消息到达时交给 `callback`；
-- 第二个 `10`：订阅队列长度，不是消息类型；
-- `ros::spin()`：让节点持续等待并执行回调，否则 `main` 很快结束，订阅者也就退出了；
-- 回调函数应尽量短。耗时任务会阻塞后续回调，造成延迟或丢消息。
+- `subscribe` 把话题、队列长度和回调函数关联起来；
+- 消息到达后，ROS 调用 `callback`；
+- `ros::spin()` 让程序持续处理回调；如果删掉它，`main` 很快结束，节点也就退出；
+- 回调函数应尽量短。长时间阻塞会使后续消息排队，队列满时可能丢消息。
 
-`ros::` 是 C++ 的命名空间限定符，表示这里使用的是 ROS C++ 客户端库中的成员。
+这里“发布者注册、订阅端注册、两边话题一致”并不表示两个节点直接写死了对方地址。它们先各自向 Master 报告，再由 ROS 完成发现和连接。
 
-### 4.3 Master 在其中做什么
-
-节点启动后先向 Master 注册自己的名称、话题和通信地址。订阅者查询到发布者地址后，会和发布者建立直接连接。之后大部分话题数据直接在两个节点之间传输，并不经过 Master。
-
-所以 `roscore` 的主要作用是“登记和牵线”，不是替每条消息做中转。
-
-## 5. 不写代码也能检查和发布话题
-
-先查看系统里有哪些话题：
-
-```bash
-rostopic list
-```
-
-再确认速度话题的连接信息和消息类型：
-
-```bash
-rostopic info /turtle1/cmd_vel
-rostopic type /turtle1/cmd_vel
-rosmsg show geometry_msgs/Twist
-```
-
-查看小乌龟不断发布的位姿：
-
-```bash
-rostopic echo /turtle1/pose
-```
-
-以 10 Hz 发布速度，让乌龟一边前进一边转弯：
+#### 不写代码也能发布速度
 
 ```bash
 rostopic pub -r 10 /turtle1/cmd_vel geometry_msgs/Twist "linear:
@@ -224,30 +272,30 @@ angular:
   z: 1.0"
 ```
 
-这里的顺序是：发布选项、话题名、消息类型、消息内容。
+这条命令表示以 10 Hz 向 `/turtle1/cmd_vel` 重复发布 `geometry_msgs/Twist`。`linear.x = 2.0` 让乌龟向前，`angular.z = 1.0` 让它同时转向，所以轨迹接近圆形。
 
-### 5.1 课堂报错：`ERROR: invalid topic type: 10`
+课堂中出现过：
 
-这个错误说明命令行把 `10` 解析到了“消息类型”的位置，但合法类型应该类似 `geometry_msgs/Twist`。遇到它时不需要盲目改数字，按下面顺序检查：
+```text
+ERROR: invalid topic type: 10
+```
+
+这不是“频率 10 不合法”，而是命令位置写错，导致 `rostopic` 把 `10` 当成了消息类型。正确顺序是：
+
+```text
+rostopic pub [选项] 话题名 消息类型 消息内容
+```
+
+可以先查清类型，再重新输入完整命令：
 
 ```bash
 rostopic type /turtle1/cmd_vel
 rosmsg show geometry_msgs/Twist
 ```
 
-确认类型后，再完整输入上面的 `rostopic pub -r 10 ...`。这里 `-r 10` 的含义是以 10 Hz 重复发送，`10` 不是消息类型。
+### 2. Service：一次请求，一次回答
 
-## 6. 服务通信：发出请求，等待一次结果
-
-服务适合“调用一次并希望得到明确回应”的操作，例如生成一只新乌龟、清空轨迹。它与话题的区别是：
-
-| 对比项 | 话题 Topic | 服务 Service |
-| --- | --- | --- |
-| 交互方式 | 发布后不等待某个订阅者回答 | 客户端发请求，服务端返回响应 |
-| 常见用途 | 速度、图像、位姿等连续数据 | 触发一次动作或查询一次结果 |
-| 关系 | 可一对多 | 一次调用对应一次应答 |
-
-查看服务和 `/spawn` 的类型：
+Service 适合“做一次并告诉我结果”的操作，例如生成乌龟、清空轨迹或查询状态。调用者会等待这一轮响应，因此不适合代替高频图像或速度流。
 
 ```bash
 rosservice list
@@ -255,7 +303,7 @@ rosservice type /spawn
 rossrv show turtlesim/Spawn
 ```
 
-生成名为 `turtle2` 的新乌龟：
+生成一只名为 `turtle2` 的乌龟：
 
 ```bash
 rosservice call /spawn "x: 2.0
@@ -264,151 +312,307 @@ theta: 0.0
 name: 'turtle2'"
 ```
 
-其中 `x`、`y`、`theta` 是初始位置和朝向，返回值中的 `name` 是最终生成的乌龟名称。课堂照片里命令行自动列出的 `x、y、theta、name`，就是 `/spawn` 请求的数据结构。
+其中 `x`、`y`、`theta` 和 `name` 是请求字段，响应中的 `name` 是最终创建的名称。使用服务前先看 `.srv` 结构，比照着截图猜参数更可靠。
 
-## 7. 参数：修改配置，不负责连续传数据
+### 3. Parameter：运行时配置
 
-参数服务器适合保存背景颜色、阈值等配置。它不适合代替高频话题。
-
-查看所有参数：
+Parameter 适合背景颜色、阈值、增益等配置。它不是连续数据总线，也不适合高速更新。
 
 ```bash
 rosparam list
-```
-
-把 turtlesim 背景改为白色：
-
-```bash
+rosparam get /turtlesim/background_r
 rosparam set /turtlesim/background_r 255
 rosparam set /turtlesim/background_g 255
 rosparam set /turtlesim/background_b 255
 rosservice call /clear
 ```
 
-`rosparam set` 修改参数，`/clear` 让 turtlesim 重新读取背景颜色并刷新画面。参数较多时通常写进 YAML，再由 launch 文件统一加载，避免每次手动输入。
+前三条 `set` 修改背景参数，调用 `/clear` 后 turtlesim 重新刷新背景。参数较多时通常写入 YAML，再由 launch 文件统一加载，便于复现实验配置。
 
-## 8. ROS 软件包和工作空间只需先掌握这些
+### 4. 一张表判断该用哪一种
 
-一个常见 catkin 工作空间如下：
+| 需求 | 应优先选择 | 原因 |
+| --- | --- | --- |
+| 相机不断输出图像 | Topic | 连续、一对多、无需逐帧应答 |
+| 持续发送底盘目标速度 | Topic | 控制目标会反复更新 |
+| 请求生成一只新乌龟 | Service | 一次请求，需要知道是否成功 |
+| 设置检测阈值或控制增益 | Parameter | 属于运行配置，不是数据流 |
+| 要求长时间执行、可反馈进度和取消 | Action | Topic 与 Service 之外的进阶机制，本课先知道用途 |
 
-```text
-catkin_ws/
-├── src/
-├── build/
-└── devel/
-```
+---
 
-- `src`：源代码和软件包；
-- `build`：CMake 构建过程产生的中间文件；
-- `devel`：编译后供当前工作空间使用的环境和可执行结果。
+## 模块四：一个 C++ 文件怎样变成 ROS 节点
 
-软件包中最重要的两个文件：
+这一模块把第二课的 CMake/Catkin 与第三课串起来。源代码不会因为包含了 `ros/ros.h` 就自动变成可运行节点，还需要软件包描述、依赖声明、编译链接和工作空间环境。
 
-- `package.xml`：包名、版本、作者和依赖；
-- `CMakeLists.txt`：如何编译、链接和安装。
-
-在工作空间根目录编译并加载环境：
-
-```bash
-cd ~/catkin_ws
-catkin_make
-source devel/setup.bash
-```
-
-如果 `rosrun` 找不到刚编译的包，先检查当前终端是否执行了 `source devel/setup.bash`。
-
-## 9. 从小乌龟连接到真实机器人控制
-
-小乌龟例子中，`/turtle1/cmd_vel` 只是让仿真程序更新画面；真实机器人中，同样的速度指令还要经过控制器和硬件接口。
+### 1. 从源码到运行的完整关系
 
 ```mermaid
 flowchart TD
-    A[/cmd_vel 目标速度] --> B[Controller 计算控制量]
-    B --> C[controller_manager 调度]
-    C --> D[RobotHW read / write]
-    D --> E[CAN 或 EtherCAT]
-    E --> F[电机执行]
-    F --> D
+    A["src/talker.cpp\n节点源码"] --> B["CMakeLists.txt\n规定编译和链接"]
+    C["package.xml\n声明包信息与依赖"] --> B
+    B --> D["catkin 构建\n产生可执行文件"]
+    D --> E["source 工作空间环境"]
+    E --> F["rosrun 启动节点"]
 ```
 
-可以把 ros_control 的一次循环记成三步：
+### 2. 软件包中的关键文件
 
-1. `read`：从编码器、电机驱动等硬件读取状态；
-2. `update`：控制器根据目标和当前状态计算输出；
-3. `write`：把输出通过 CAN、EtherCAT 等总线发给电机。
+```text
+dx_ros_practice/
+├── CMakeLists.txt
+├── package.xml
+└── src/
+    ├── talker.cpp
+    └── listener.cpp
+```
 
-因此，ROS 话题负责模块之间传递“目标和状态”，控制器负责计算，RobotHW 负责把统一接口翻译成真实硬件通信。
+- `package.xml`：描述包名、版本、维护者和依赖；
+- `CMakeLists.txt`：告诉构建系统找哪些包、编译哪些源码、链接哪些库；
+- `src/*.cpp`：节点的 C++ 源码。
 
-## 10. 一套实用的排错顺序
+对应的核心 CMake 写法是：
 
-遇到“程序启动了但没有反应”时，我应该按数据流逐层检查，而不是反复重启：
+```cmake
+find_package(catkin REQUIRED COMPONENTS
+  roscpp
+  std_msgs
+)
 
-1. **节点是否存在**
+catkin_package()
 
-   ```bash
-   rosnode list
-   ```
+include_directories(
+  ${catkin_INCLUDE_DIRS}
+)
 
-2. **目标节点发布和订阅了什么**
+add_executable(talker src/talker.cpp)
+target_link_libraries(talker ${catkin_LIBRARIES})
 
-   ```bash
-   rosnode info /turtlesim
-   ```
+add_executable(listener src/listener.cpp)
+target_link_libraries(listener ${catkin_LIBRARIES})
+```
 
-3. **话题是否存在、名称是否完全一致**
+`add_executable` 负责把 `.cpp` 编译成可执行程序，`target_link_libraries` 负责链接 ROS 库。只有源码而没有这两步，`rosrun` 找不到可执行目标。
 
-   ```bash
-   rostopic list
-   ```
+### 3. 一套可复现的构建流程
 
-4. **消息类型是否正确**
+以下命令是复习模板；完成时应记录自己的真实输出，不把“准备运行”写成“已经成功”。
 
-   ```bash
-   rostopic type /turtle1/cmd_vel
-   rosmsg show geometry_msgs/Twist
-   ```
+```bash
+mkdir -p ~/catkin_ws/src
+cd ~/catkin_ws/src
+catkin_create_pkg dx_ros_practice roscpp std_msgs geometry_msgs
+cd ~/catkin_ws
+catkin build
+source devel/setup.bash
+```
 
-5. **话题里是否真的有数据**
+将源码与 CMake 配好后，再执行：
 
-   ```bash
-   rostopic echo /turtle1/pose
-   rostopic hz /turtle1/pose
-   ```
+```bash
+cd ~/catkin_ws
+catkin build dx_ros_practice
+source devel/setup.bash
+rosrun dx_ros_practice talker
+```
 
-6. **发布者和订阅者是否连上**
+另开终端运行订阅者时，也要加载同一工作空间：
 
-   ```bash
-   rostopic info /turtle1/cmd_vel
-   rqt_graph
-   ```
+```bash
+source ~/catkin_ws/devel/setup.bash
+rosrun dx_ros_practice listener
+```
 
-7. **如果是服务，再查服务类型和请求字段**
+如果自己的环境采用 `catkin_make`，就在工作空间根目录使用 `catkin_make`。同一工作空间不要随意混用 `catkin_make` 与 `catkin build`，因为两者的构建目录布局和管理方式不同。
 
-   ```bash
-   rosservice type /spawn
-   rossrv show turtlesim/Spawn
-   ```
+### 4. 节点运行后，重点观察什么
 
-这套顺序对应“进程—连接—类型—数据—调用”，能快速判断问题是在节点没运行、名字写错、类型不匹配，还是根本没有数据。
+```bash
+rosnode list
+rostopic info /chatter
+rostopic echo /chatter
+rostopic hz /chatter
+```
 
-## 11. 这节课我需要能独立回答的问题
+预期关系应为：
 
-- 为什么方向键不是直接控制小乌龟，而是先发布 `Twist` 消息？
-- `/turtle1/cmd_vel` 和 `geometry_msgs/Twist` 分别是话题名还是消息类型？
-- 为什么发布者和订阅者的话题名、消息类型都必须一致？
-- `ros::spin()` 为什么不能随便删掉？
-- `Ctrl+C`、`q` 和 `rosnode kill` 分别在什么场景下结束节点？
-- Master 完成连接后，话题数据是否仍然要经过 Master？
-- 什么情况用 Topic，什么情况用 Service，什么情况用 Parameter？
-- 真实机器人中，Controller、RobotHW 和 CAN/EtherCAT 各自负责什么？
-- 看到 `invalid topic type: 10` 时，应该先检查哪个参数位置？
+- `/talker` 发布 `/chatter`；
+- `/listener` 订阅 `/chatter`；
+- `/chatter` 的类型为 `std_msgs/String`；
+- 发布频率约为 1 Hz；
+- 订阅端打印 `I heard: hello`。
 
-如果这些问题能不看笔记讲清楚，说明已经掌握了第三课的主线，而不是只记住几条命令。
+这几项是“通信确实成立”的证据，比只看到程序没有报错更可靠。
+
+---
+
+## 模块五：从课堂例子连接到 RoboMaster 系统
+
+> 本模块用于建立后续课程的接口。它解释课堂知识将来用在哪里，不表示本节课已经实现了完整状态估计或底盘控制。
+
+### 1. 小乌龟和真实机器人的对应关系
+
+| 小乌龟例子 | 真实机器人中可能对应 |
+| --- | --- |
+| 键盘节点发布速度 | 决策或遥控节点给出目标速度 |
+| `/turtle1/cmd_vel` | 底盘速度目标话题 |
+| turtlesim 接收并更新状态 | 控制器接收目标并计算电机指令 |
+| `/turtle1/pose` | 定位或状态估计节点发布的位姿 |
+| 屏幕上的轨迹 | 机器人真实运动及传感器反馈 |
+
+差别在于：仿真只需更新数学状态和画面，真实机器人还要处理编码器、IMU、CAN 总线、控制周期、延迟和噪声。
+
+### 2. 为什么线性代数会出现在 ROS 数据流里
+
+线性代数视频最值得带回 ROS 的不是背矩阵运算，而是两个观念：
+
+1. **向量表示一个完整状态**。例如二维机器人可以用
+
+   $$
+   \mathbf{x} = [x,\ y,\ \theta,\ v,\ \omega]^T
+   $$
+
+   同时描述位置、朝向、线速度和角速度。
+
+2. **矩阵表示一种线性变换或状态关系**。坐标系变换、相机投影、状态预测都会把一个向量映射到另一个向量。
+
+在 ROS 中，消息负责把这些数值从一个节点送到另一个节点；线性代数负责说明这些数值怎样组合和变换。ROS 解决“数据怎么到达”，算法解决“数据到达后怎么算”。
+
+### 3. 卡尔曼滤波为什么适合做成一个节点
+
+传感器有噪声，只依靠运动模型又会逐渐漂移。卡尔曼滤波把两类信息结合起来：
+
+- **预测**：根据上一时刻状态和控制输入推测现在的位置；
+- **观测**：读取相机、编码器或 IMU 给出的测量；
+- **修正**：依据两边的不确定性决定更信任谁。
+
+最基本的线性形式可以先读懂含义，不必现在推导全部协方差公式：
+
+$$
+\hat{\mathbf{x}}_k^- = A\hat{\mathbf{x}}_{k-1} + B\mathbf{u}_k
+$$
+
+$$
+\hat{\mathbf{x}}_k = \hat{\mathbf{x}}_k^- + K_k(\mathbf{z}_k - H\hat{\mathbf{x}}_k^-)
+$$
+
+- `上一状态 + 控制输入` 得到预测值 $\hat{\mathbf{x}}_k^-$；
+- $\mathbf{z}_k - H\hat{\mathbf{x}}_k^-$ 是“实测与预测的差”；
+- $K_k$ 决定这次修正的幅度，它与模型和测量的不确定性有关。
+
+所以卡尔曼滤波不只是“把曲线变平滑”，而是在模型预测与传感器观测之间进行带有不确定性权衡的融合。
+
+放进 ROS 后，可以形成这样的模块关系：
+
+```mermaid
+flowchart TD
+    A["编码器节点\n发布轮速"] --> C["状态估计节点\n预测 + 观测修正"]
+    B["IMU / 视觉节点\n发布测量"] --> C
+    C --> D["控制节点\n订阅估计状态"]
+    E["目标节点\n发布期望状态"] --> D
+    D --> F["硬件接口\n发送电机命令"]
+```
+
+这正体现了 ROS 的模块化：更换某种传感器时，只要消息接口保持一致，估计与控制节点不必全部重写。
+
+### 4. `ros_control` 的 `read-update-write` 循环
+
+对真实底盘，可以把一轮控制记成三步：
+
+1. `read`：从编码器、IMU 或电机驱动读取当前状态；
+2. `update`：控制器根据目标值与当前状态计算输出；
+3. `write`：通过 CAN、EtherCAT 等接口把命令发给执行器。
+
+ROS 话题主要传递模块之间的目标和状态；控制算法计算控制量；硬件接口负责把统一的软件接口翻译成具体总线数据。三者不能混为一层。
+
+---
+
+## 模块六：排错、复现与自测
+
+### 1. “节点在运行但没有反应”时的固定排错顺序
+
+| 层级 | 要回答的问题 | 建议命令 |
+| --- | --- | --- |
+| 1. Master | ROS 核心是否正常 | `rosnode list` |
+| 2. Node | 需要的节点是否存在、能否响应 | `rosnode list`、`rosnode ping /turtlesim` |
+| 3. Connection | 发布者和订阅者是否连接 | `rosnode info /turtlesim`、`rqt_graph` |
+| 4. Name | 话题名是否完全一致 | `rostopic list`、`rostopic info /turtle1/cmd_vel` |
+| 5. Type | 消息类型和字段是否正确 | `rostopic type ...`、`rosmsg show ...` |
+| 6. Data | 是否真的有数据，频率是否合理 | `rostopic echo ...`、`rostopic hz ...` |
+| 7. Service | 请求类型和字段是否正确 | `rosservice type ...`、`rossrv show ...` |
+| 8. Build | 包是否编译并加载环境 | `catkin build`、`source devel/setup.bash` |
+
+我应该沿着数据流逐层缩小范围，而不是一看到没反应就反复重启。比如“乌龟不动”可以依次判断：控制节点是否存在 → `/cmd_vel` 是否存在 → 类型是不是 `Twist` → `echo` 能否看到数据 → `turtlesim` 是否订阅成功。
+
+### 2. 常见现象与原因
+
+| 现象 | 优先检查 |
+| --- | --- |
+| `rosrun` 找不到包 | 当前终端是否 `source` 了正确工作空间 |
+| `rosrun` 找到包但找不到节点 | `CMakeLists.txt` 是否生成可执行文件，构建是否成功 |
+| 发布端有输出，订阅端无输出 | 话题名、消息类型和 ROS Master 是否一致 |
+| `invalid topic type: 10` | `-r 10` 的位置以及真正的消息类型 |
+| 小乌龟窗口存在但方向键无效 | 键盘焦点是否在 teleop 终端 |
+| `echo` 有消息但对象不运动 | 接收节点是否订阅、实际使用了哪些消息字段 |
+| 新终端执行命令找不到自建包 | 新终端还没有加载 `devel/setup.bash` |
+
+### 3. 课后复现清单
+
+下面使用未勾选框，是为了区分“笔记中已经理解”与“我在本机重新完成并保存证据”。每完成一项，再把 `[ ]` 改成 `[x]` 并补一句结果。
+
+- [ ] 用三个终端启动 `roscore`、`turtlesim_node` 和 `turtle_teleop_key`；
+- [ ] 用 `rqt_graph` 看见键盘节点到 `/turtlesim` 的话题连接；
+- [ ] 用 `rostopic echo /turtle1/pose` 观察位置和角度变化；
+- [ ] 不用键盘，使用 `rostopic pub -r 10` 让乌龟走圆；
+- [ ] 用 `/spawn` 创建 `turtle2`，并解释请求与响应字段；
+- [ ] 修改背景参数并调用 `/clear` 刷新；
+- [ ] 编译 `talker` 和 `listener`，验证 `/chatter` 为 1 Hz；
+- [ ] 故意写错一次话题名或类型，再用固定排错顺序找出问题。
+
+### 4. 不看答案先自测
+
+1. 为什么方向键不是直接控制小乌龟？
+2. `/turtle1/cmd_vel` 和 `geometry_msgs/Twist` 分别是什么？
+3. `Twist` 中存在 `linear.y`，为什么 turtlesim 不一定使用它？
+4. Master 完成连接后，话题数据是否仍要逐条经过 Master？
+5. `ros::spin()` 为什么不能从订阅者中随便删掉？
+6. Topic、Service、Parameter 分别适合什么场景？
+7. `Ctrl+C`、`q` 和 `rosnode kill` 有什么区别？
+8. 为什么看到程序没有报错，还不能证明通信成功？
+9. 卡尔曼滤波节点的输入和输出可以分别是什么？
+10. 真实机器人的 `read-update-write` 各负责什么？
+
+<details>
+<summary>展开核对答案</summary>
+
+1. 键盘节点只负责把运动意图编码成消息，真正更新状态的是订阅该消息的 turtlesim 节点。
+2. 前者是话题名，后者是消息类型。
+3. 消息定义只规定可用字段；接收端源码决定实际读取哪些字段，turtlesim 主要读取 `linear.x` 和 `angular.z`。
+4. 通常不需要。Master 负责注册与发现，数据主要由节点之间直接传输。
+5. 没有持续处理回调的循环，`main` 会结束，订阅节点也随之退出。
+6. 连续数据用 Topic；一次请求和响应使用 Service；运行配置使用 Parameter。
+7. `Ctrl+C` 中断当前前台进程；`q` 是 teleop 程序定义的退出键；`rosnode kill` 从另一个终端请求指定节点关闭。
+8. 还需要核对节点、连接、类型、真实数据和频率。
+9. 输入可以是运动模型、控制量和传感器测量，输出是融合后的状态估计及其不确定性。
+10. `read` 读取硬件状态，`update` 计算控制量，`write` 把命令发送给硬件。
+
+</details>
+
+## 本节总结
+
+我对第三课主线的理解可以压缩成一句话：**ROS 把机器人拆成多个节点，再用有明确名字和类型的接口把它们连接起来。**
+
+小乌龟例子让我看到一条最小但完整的链路：输入节点发布 `Twist`，仿真节点订阅并处理，位姿再作为状态发布。Topic、Service 和 Parameter 的区别，本质上是连续数据、一次交互和运行配置三类需求的区别。以后接触视觉、卡尔曼滤波和底盘控制时，算法内容会变复杂，但仍然可以用同样的问题去分析：数据从哪里来、是什么类型、经过哪个节点、最后驱动什么结果。
 
 ## 参考资料
 
-- 课程第三课 PPT《ROS 架构与通信》及课堂演示照片
+- [第三课课堂录屏：ROS 架构与通信](https://www.bilibili.com/video/BV1cgxM6fEya/)
+- [线性代数的本质系列](https://www.bilibili.com/video/BV1ys411472E/)
+- [卡尔曼滤波保姆级动画拆解](https://www.bilibili.com/video/BV1Cvpi6eE9q/)
 - [ROS Noetic 官方 talker 示例](https://github.com/ros/ros_tutorials/blob/noetic-devel/roscpp_tutorials/talker/talker.cpp)
 - [ROS Noetic 官方 listener 示例](https://github.com/ros/ros_tutorials/blob/noetic-devel/roscpp_tutorials/listener/listener.cpp)
 - [turtlesim 官方运动处理源码](https://github.com/ros/ros_tutorials/blob/noetic-devel/turtlesim/src/turtle.cpp)
-- [ros_control 官方仓库](https://github.com/ros-controls/ros_control/tree/noetic-devel)
+- [ROS Wiki：Understanding ROS Nodes](https://wiki.ros.org/ROS/Tutorials/UnderstandingNodes)
+- [ROS Wiki：Understanding ROS Topics](https://wiki.ros.org/ROS/Tutorials/UnderstandingTopics)
+- [ROS Wiki：Understanding ROS Services and Parameters](https://wiki.ros.org/ROS/Tutorials/UnderstandingServicesParams)
+- [ros_control 的 RobotHW 接口](https://github.com/ros-controls/ros_control/blob/noetic-devel/hardware_interface/include/hardware_interface/robot_hw.h)
