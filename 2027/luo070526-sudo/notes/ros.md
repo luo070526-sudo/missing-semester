@@ -556,6 +556,14 @@ ROS 话题主要传递模块之间的目标和状态；控制算法计算控制�
 | `echo` 有消息但对象不运动 | 接收节点是否订阅、实际使用了哪些消息字段 |
 | 新终端执行命令找不到自建包 | 新终端还没有加载 `devel/setup.bash` |
 
+### 补充：10月29日实操注意事项（Docker + ROS）
+
+- **分清宿主机和容器**：在 Ubuntu 宿主机用 `sudo docker ps -a` 查看真实容器名，再用 `sudo docker exec -it noetic-gui bash` 进入；出现 `root@...#` 后已在容器内，不要再次执行 `docker exec`。
+- **ROS 环境只在对应环境内加载**：宿主机找不到 `/opt/ros/noetic/setup.bash` 不等于 ROS 没装；容器内 `echo $ROS_DISTRO` 已确认 `noetic`。现有工作目录是 `/workspace/ros1_ws`，复用旧工程前先检查是否需要 `source devel/setup.bash`。
+- **不要重复启动 Master**：`roscore` 提示 `another roscore/master is already running` 时，先用 `rosnode list`、`rostopic list` 验证现有服务，不要随意杀进程。今天已查询到 `/dx_velocity_node` 与 `/dx_demo/cmd_vel`，具体发布者、消息类型和数据仍须用 `rosnode info`、`rostopic info/type/echo` 验证。
+- **图形故障≠ROS故障**：`turtlesim` 出现 `Authorization required`、`could not connect to display :0` / Qt `xcb` 错误，应先排查宿主机 X11 授权、`DISPLAY` 和 `/tmp/.X11-unix` 挂载；不要直接重装 ROS。**本次小乌龟图形显示尚未验证修复。**
+- **安装包提示需分辨严重程度**：Clash Verge 的 `正在设置` 表示安装成功；APT 访问本地 `.deb` 的低权限警告不等于失败。暂不盲目执行 `apt autoremove`，以免误删 Fcitx 输入法依赖。
+
 ### 3. 课后复现清单
 
 下面使用未勾选框，是为了区分“笔记中已经理解”与“我在本机重新完成并保存证据”。每完成一项，再把 `[ ]` 改成 `[x]` 并补一句结果。
