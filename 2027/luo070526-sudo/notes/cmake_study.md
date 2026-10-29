@@ -411,7 +411,9 @@ cmake .. 把 ~/下载 当成源码目录
 
 ---
 
-## 9. 当前完成情况与下一步
+## 9. 早期进度记录（保留历史快照）
+
+> 本节保留了最初练习包阶段的真实记录，**不是当前最新进度**。2026-10-29 完成的差速底盘工程、ROS 通信和代码检查见第 10 节。
 
 ### 已完成并有终端记录
 
@@ -445,7 +447,188 @@ find build -maxdepth 2 -type f -executable
 
 ---
 
-## 10. 参考资料
+## 10. 2026-10-29 后续实操与鲁棒性改进
+
+> **证据范围**：CMake、Catkin 和 ROS 的部分结果有本人 Ubuntu 终端截图；加强版代码与 14 项测试由 AI 在独立 Linux 环境运行验证。两种验证环境必须区分，不能将“AI 环境通过”误写为“本人电脑已经执行修复脚本”。以下为技术事实补充，个人心得仍需自行补写。
+
+### 10.1 新实战工程：差速底盘运动学
+
+这次使用的新工程路径是 `~/下载/DynamicX_第二课_差速底盘实战/native`，与第 4 节的早期 `cmake_demo` 不同。根据双轮差速底盘无侧滑的简化模型，已知左右轮角速度 `leftWheel`、`rightWheel`、轮半径 `radius` 和轮距 `wheelBase`，计算：
+
+```text
+linear  = radius * (leftWheel + rightWheel) / 2
+angular = radius * (rightWheel - leftWheel) / wheelBase
+```
+
+示例采用 `leftWheel = 8 rad/s`、`rightWheel = 12 rad/s`、`radius = 0.05 m`、`wheelBase = 0.30 m`，得到：
+
+```text
+linear = 0.500000 m/s
+angular = 0.666667 rad/s
+```
+
+本机截图记录了下列命令成功执行，CTest 结果为 1/1 通过：
+
+```bash
+cd ~/下载/DynamicX_第二课_差速底盘实战/native
+cmake -S . -B cmake_build
+cmake --build cmake_build
+./cmake_build/dx_demo
+ctest --test-dir cmake_build --output-on-failure
+```
+
+### 10.2 实际 CMakeLists.txt 的构建关系
+
+新工程在 `CMakeLists.txt` 中定义如下构建目标：
+
+```cmake
+cmake_minimum_required(VERSION 3.10)
+project(dx_diff_drive LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+add_library(dx_kinematics src/diff_drive.cpp)
+target_include_directories(dx_kinematics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_executable(dx_demo src/main.cpp)
+target_link_libraries(dx_demo PRIVATE dx_kinematics)
+
+enable_testing()
+add_executable(dx_test tests/test.cpp)
+target_link_libraries(dx_test PRIVATE dx_kinematics)
+add_test(NAME diff_drive_math COMMAND dx_test)
+```
+
+| 指令 | 在本项目中的作用 |
+| --- | --- |
+| `cmake_minimum_required()` | 规定最低 CMake 版本为 3.10 |
+| `project()` | 声明 C++ 工程 `dx_diff_drive` |
+| `CMAKE_CXX_STANDARD` | 要求 C++17 标准 |
+| `add_library()` | 将运动学计算封装为 `dx_kinematics` 库 |
+| `target_include_directories(... PUBLIC ...)` | 暴露库头文件目录，使用库的目标也能继承该路径 |
+| `add_executable()` | 分别创建演示程序 `dx_demo` 与测试程序 `dx_test` |
+| `target_link_libraries(... PRIVATE ...)` | 将库链接给指定程序，依赖不向下游传播 |
+| `enable_testing()` 与 `add_test()` | 将 `dx_test` 注册为 CTest 测试 |
+
+我需要理解的是“**运动学函数作为库被多个可执行目标复用**”，而非把所有 `.cpp` 文件都堆进一个程序。
+
+### 10.3 Catkin 双功能包与 ROS Topic 真实验证
+
+在 ROS Noetic Docker 容器 `noetic-gui` 内，工作空间为 `~/dx_lesson2_ws`，包含两个功能包：
+
+- `dx_kinematics`：运动学计算库；
+- `dx_velocity_node`：依赖前者、发布 ROS 速度消息的节点。
+
+第一次 `catkin_make` 编译时报：
+
+```text
+fatal error: diff_drive.h: No such file or directory
+```
+
+原因：ROS 包的头文件实际位于 `include/dx_kinematics/diff_drive.h`，而实现文件使用 `#include "diff_drive.h"`，与构建时暴露的头文件搜索路径不一致。随后在容器中将引用改成：
+
+```cpp
+#include "dx_kinematics/diff_drive.h"
+```
+
+重新执行 `catkin_make` 并加载 `devel/setup.bash` 后，`roslaunch dx_velocity_node demo.launch` 成功运行，终端连续显示：
+
+```text
+v=0.500 m/s, w=0.667 rad/s
+```
+
+另一个容器终端验证：
+
+```bash
+source /opt/ros/noetic/setup.bash
+source ~/dx_lesson2_ws/devel/setup.bash
+rosnode list
+rostopic echo -n 1 /dx_demo/cmd_vel
+```
+
+实际截图显示 `/dx_velocity_node` 和 `/rosout`；`/dx_demo/cmd_vel` 的 `linear.x = 0.5`、`angular.z = 0.6666666666666667`。这证明程序不只在终端打印数字，还真正通过 ROS Topic 发布了 `geometry_msgs/Twist` 消息。
+
+另外，成功执行 `catkin_create_pkg my_training_pkg roscpp std_msgs` 创建新包。**是否完成此新包的二次编译与 `rospack find` 验证，应以之后的终端结果补充，不能凭“已创建”推断“已构建”。**
+
+### 10.4 代码检查：原计算函数缺少参数合法性校验
+
+原函数在正常参数下计算正确，但没有处理以下非法输入：
+
+| 输入 | 潜在问题 | 建议行为 |
+| --- | --- | --- |
+| `radius <= 0` | 不符合轮半径的物理约束 | 拒绝参数 |
+| `wheelBase <= 0` | 轮距非法，零轮距还会引发浮点除零 | 拒绝参数 |
+| 轮速、半径或轮距出现 `NaN`、`Inf` | 可能产生非法结果 | 拒绝参数 |
+| 有限输入导致结果溢出 | 输出无穷大而未被察觉 | 报告溢出 |
+| 轮速为负 | 可以表示倒车或反向旋转 | **允许**，不应误判为非法 |
+
+改进后的 `native/src/diff_drive.cpp` 保留原运动学公式，增加 `std::isfinite` 检测、`radius > 0` 与 `wheelBase > 0` 检测；非法输入抛出 `std::invalid_argument`，计算结果非有限值时抛出 `std::overflow_error`。例如：
+
+```cpp
+if (!std::isfinite(leftWheel) || !std::isfinite(rightWheel) ||
+    !std::isfinite(radius) || !std::isfinite(wheelBase) ||
+    radius <= 0.0 || wheelBase <= 0.0) {
+    throw std::invalid_argument("Invalid wheel parameters");
+}
+```
+
+此处代码段是逻辑示意，完整版本还会对 `result.linear`、`result.angular` 再检查一次。真实机器人节点还需要合理捕获异常或在输入边界校验，不能让未处理异常直接导致控制节点退出。
+
+### 10.5 CTest 由正常计算扩展为异常与边界测试
+
+改进版 `native/tests/test.cpp` 不再只测正常数据，而是覆盖 **14 个场景**：
+
+| 组别 | 场景 | 数量 |
+| --- | --- | ---: |
+| 正常运动 | 左转、直行、原地旋转、静止、倒车 | 5 |
+| 非法参数及溢出 | 零/负轮半径、零/负轮距、无穷轮速、NaN 轮速、无穷半径、NaN 轮距、算术溢出 | 9 |
+
+测试中还将普通 `assert()` 改为显式检查，使某些启用 `NDEBUG` 的构建方式不会将关键测试完全关闭。测试程序通过返回码 `0` 表示全部成功，非零表示失败。
+
+**独立 Linux 环境实测**（不是本人 Ubuntu 修复后的回传截图）：
+
+```text
+linear = 0.500000 m/s
+angular = 0.666667 rad/s
+14 passed; 0 failed
+1/1 Test #1: diff_drive_math ... Passed
+100% tests passed, 0 tests failed out of 1
+```
+
+这里的“14”表示 `dx_test` 内部的检查场景，“1/1”表示 CTest 注册了一个 `diff_drive_math` 测试程序，二者并不矛盾。`CMakeLists.txt` 无需修改，因为原本已经将测试目标正确注册到 CTest。
+
+**本机待复现**：之前提供的 `DynamicX_Lesson2_apply_fix.sh` 能备份并更新本机 `native/src/diff_drive.cpp`、`native/tests/test.cpp`，随后执行 CMake 和 CTest；目前没有本人在 Ubuntu 执行此脚本的终端截图，因此不能标记为已在本机完成。
+
+### 10.6 AI 辅助开发：最小修复、执行证据与边界
+
+今天的工作过程可概括为：
+
+```text
+读取真实报错 → 识别阶段与根因 → 修改最小必要代码
+    → 重新构建 → 运行目标 → CTest 验证 → 记录证据
+```
+
+- AI 的作用是帮助定位 `#include` 路径问题、梳理参数边界、设计补充测试；但结果必须回到真实终端核实。
+- 本机 Codex CLI 已打开登录界面，随后网页授权返回 `unsupported_country_region_territory`，因此**不能记作已成功登录 Codex 或用其直接修改本机文件**。
+- 不应把 AI 在独立环境得出的“测试通过”直接当成本机证据，也不能把原本的 CMake `native` 改动误认为已自动同步到 ROS 容器副本。
+- 遇到 `No such file or directory`，要先区分是 **目录错误、头文件路径错误，还是 Docker 容器名称不正确**；三者的修复方式不同。
+
+### 10.7 本阶段进度与后续个人补充
+
+- [x] 本机 CMake 配置、编译、运行和最初的 CTest 测试通过；
+- [x] 本机 Catkin 双包构建、ROS 节点运行和 Topic 消息验证通过；
+- [x] `my_training_pkg` 功能包已创建；
+- [x] AI 在独立 Linux 环境验证参数检查改进及 14 项测试通过；
+- [ ] 本机运行修复脚本并保存 14 项测试输出；
+- [ ] 按真实终端输出确认 `my_training_pkg` 是否二次编译、识别成功；
+- [ ] 自己补充修改前后差异与新学到的知识点；
+- [ ] 结合课件指定阅读资料补全独立理解和反思。
+
+> **留给自己补写**：为什么“构建成功”不等于“计算结果可靠”？为什么测过正常运动，还需要测试零轮距、NaN 和溢出？为什么在机器人控制软件中必须区分“程序抛异常”和“系统安全处理异常”？这些问题应在自己真正跑过修复脚本以后，用个人语言回答。
+
+---
+
+## 11. 参考资料
 
 - [ROS Wiki：catkin Tutorials](https://wiki.ros.org/catkin/Tutorials)
 - [知乎：Make、Makefile 与 CMake](https://zhuanlan.zhihu.com/p/476697014)
