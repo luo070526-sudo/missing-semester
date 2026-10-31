@@ -356,9 +356,3 @@ AI 适合解释报错和补充边界情况，但最终应以 `pwd`、`ls`、编�
 7. ROS 包找不到时检查依赖和 `source`；
 8. 构建成功后仍要运行目标并检查输出。
 
-## 参考资料
-
-- [Make、Makefile 与 CMake](https://zhuanlan.zhihu.com/p/476697014)
-- [CMake 基础](https://www.runoob.com/cmake/cmake-basic.html)
-- [The Emperor Has No Clothes](https://www.mihaileric.com/The-Emperor-Has-No-Clothes/)
-- [ROS Wiki：catkin Tutorials](https://wiki.ros.org/catkin/Tutorials)
