@@ -2,9 +2,9 @@
 tags:
   - type/lesson
   - topic/ros
-  - status/done
   - topic/gazebo
   - topic/vision
+  - status/done
 date: 2026-10-29
 ---
 
@@ -488,6 +488,7 @@ URDF/Xacro 描述“传感器装在哪里”，Gazebo 插件负责“在仿真�
 #include <image_transport/image_transport.h>
 #include <cv_bridge/cv_bridge.h>
 #include <sensor_msgs/image_encodings.h>
+#include <opencv2/core.hpp>
 
 void imageCallback(const sensor_msgs::ImageConstPtr& msg) {
   try {
@@ -588,12 +589,13 @@ rosrun tf tf_echo base_link front_optical_link
 需要离线复现视觉问题时，可以只录关键话题：
 
 ```bash
-rosbag record /front/color/image_raw /front/color/camera_info /imu0
-rosbag info 2026-10-31-22-00-00.bag
-rosbag play 2026-10-31-22-00-00.bag
+rosbag record -O vision_test.bag /front/color/image_raw /front/color/camera_info /imu0
+# 录制结束时按 Ctrl+C
+rosbag info vision_test.bag
+rosbag play vision_test.bag
 ```
 
-实际生成的 bag 文件名由录制时间决定，执行 `rosbag info` 时应替换成当前目录中的真实文件名。
+`-O vision_test.bag` 固定了输出文件名，便于后续查看和回放。
 
 ### 9.6 这份工程暴露出的接口问题
 
