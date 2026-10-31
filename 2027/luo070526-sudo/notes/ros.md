@@ -3,6 +3,8 @@ tags:
   - type/lesson
   - topic/ros
   - status/done
+  - topic/gazebo
+  - topic/vision
 date: 2026-10-29
 ---
 
@@ -409,3 +411,209 @@ ROS 解决数据如何传递，算法解决收到数据后如何计算。
 
 “乌龟不动”时，按节点、话题、类型、数据、订阅端处理的顺序检查，不要直接重装 ROS。
 
+## 9. 视觉组：从 Gazebo 仿真到图像处理
+
+第三课课件给出的视觉链路是：
+
+```text
+相机驱动发布图像 /image_raw
+  → 识别节点订阅图像并发布目标 /track
+  → 解算节点计算云台指令 /gimbal_cmd
+  → 控制节点把指令发送给执行机构
+```
+
+图像、检测结果和控制指令都在持续变化，因此主要使用 Topic。相机内参、曝光和识别阈值等配置适合放在 Parameter 或 YAML 中；标定、保存一次图片等偶发操作才适合 Service。
+
+### 9.1 `smb_common_v2` 的三个功能包
+
+这个压缩包是 Super Mega Bot 的 ROS1 仿真工程。根据源码，它把机器人模型、Gazebo 仿真和控制配置拆成三个包：
+
+| 功能包 | 主要作用 | 关键文件 |
+| --- | --- | --- |
+| `smb_description` | 描述机器人本体、关节和传感器安装位置 | `urdf/`、`sensor_plugins/`、`launch/load.launch` |
+| `smb_gazebo` | 加载仿真世界、生成机器人并运行 Gazebo 插件 | `launch/smb_gazebo.launch`、`worlds/` |
+| `smb_control` | 加载底盘控制器、速度选择和定位参数 | `config/`、`launch/control.launch` |
+
+源码中的启动关系可以整理为：
+
+```text
+smb_gazebo.launch
+├── 启动 Gazebo 世界
+├── spawn_model 从 robot_description 生成机器人
+├── 把 /rslidar_points 转换成 /scan
+└── 包含 control.launch
+    ├── load.launch 调用 xacro 生成 robot_description
+    ├── controller_manager 加载底盘与关节状态控制器
+    ├── robot_state_publisher 发布 TF
+    ├── twist_mux 选择速度指令来源
+    └── ekf_localization 融合里程计与 IMU
+```
+
+`robot_description` 是参数服务器中的整棵 URDF 模型。Gazebo 根据它生成机器人，`robot_state_publisher` 再根据关节状态发布各坐标系之间的 TF。
+
+### 9.2 Gazebo 传感器插件
+
+URDF/Xacro 描述“传感器装在哪里”，Gazebo 插件负责“在仿真中产生数据并发布成 ROS 话题”。
+
+| 传感器 | 源码中的主要设置 | 发布内容 |
+| --- | --- | --- |
+| 单目相机 | `640×480`、`30 Hz`、视场角约 `80°` | `/mono/cam0/image_raw` |
+| Blackfly 相机 | `720×540`，帧率由宏参数传入 | `/<name>/color/image_raw`、`/<name>/color/camera_info` |
+| 双目相机 | 左右各 `720×540`，基线 `0.09 m` | 左右图像与相机信息，最终名称受命名空间影响 |
+| 深度相机 | `1280×720`，裁剪范围 `0.05～11 m` | 彩色图、深度图、深度相机信息和点云 |
+| Velodyne 激光雷达 | `10 Hz` | `/rslidar_points`，随后可转换为 `/scan` |
+| IMU | `400 Hz` | `/imu0` |
+
+图像话题通常使用 `sensor_msgs/Image`。`camera_info` 保存相机标定信息，做去畸变、三维恢复或 PnP 解算时不能只订阅图像而忽略它。`frameName` 则说明数据属于哪个坐标系，后续通过 TF 转换到云台、底盘或世界坐标系。
+
+### 9.3 文件存在不等于插件已经运行
+
+压缩包中虽然有单目、双目和深度相机插件，但默认的 `smb_standalone.urdf.xacro` 只实际接入了 IMU 和激光雷达。相机文件目前更像可复用的宏定义。
+
+要让虚拟相机真正发布数据，至少要完成：
+
+1. 在主 Xacro 中 `include` 相机插件文件；
+2. 创建相机对应的 `link`、固定 `joint` 和 optical frame；
+3. 实例化相机宏，并保证 `<gazebo reference="...">` 指向真实存在的 link；
+4. 启动后用 `rostopic list` 确认图像话题确实出现。
+
+因此不能仅凭“目录里有相机文件”就写成“相机仿真已经运行成功”。
+
+### 9.4 视觉节点的典型订阅代码
+
+视觉节点接收 ROS 图像时，常用 `image_transport` 订阅，再用 `cv_bridge` 转成 OpenCV 图像：
+
+```cpp
+#include <ros/ros.h>
+#include <image_transport/image_transport.h>
+#include <cv_bridge/cv_bridge.h>
+#include <sensor_msgs/image_encodings.h>
+
+void imageCallback(const sensor_msgs::ImageConstPtr& msg) {
+  try {
+    const cv_bridge::CvImageConstPtr cvPtr =
+        cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGR8);
+
+    const cv::Mat& image = cvPtr->image;
+    ROS_INFO_THROTTLE(1.0, "image: %d x %d, frame: %s",
+                      image.cols, image.rows,
+                      msg->header.frame_id.c_str());
+
+    // 在这里进行颜色转换、目标检测或特征提取。
+  } catch (const cv_bridge::Exception& e) {
+    ROS_ERROR("cv_bridge error: %s", e.what());
+  }
+}
+
+int main(int argc, char** argv) {
+  ros::init(argc, argv, "vision_subscriber");
+  ros::NodeHandle nh;
+  image_transport::ImageTransport it(nh);
+
+  image_transport::Subscriber sub =
+      it.subscribe("/mono/cam0/image_raw", 1, imageCallback);
+
+  ros::spin();
+  return 0;
+}
+```
+
+图像数据量大，订阅队列通常先设为 `1`，让处理节点优先拿到最新帧，避免算法速度跟不上时积压大量旧图像。回调中若要进行耗时推理，还应考虑独立线程或把处理拆到其他节点。
+
+对应的 CMake 核心配置：
+
+```cmake
+find_package(catkin REQUIRED COMPONENTS
+  roscpp
+  sensor_msgs
+  image_transport
+  cv_bridge
+)
+find_package(OpenCV REQUIRED)
+
+include_directories(
+  ${catkin_INCLUDE_DIRS}
+  ${OpenCV_INCLUDE_DIRS}
+)
+
+add_executable(vision_subscriber src/vision_subscriber.cpp)
+target_link_libraries(
+  vision_subscriber
+  ${catkin_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+)
+```
+
+`package.xml` 中也要声明 `roscpp`、`sensor_msgs`、`image_transport` 和 `cv_bridge`，否则换一台电脑或重新安装依赖时可能构建失败。
+
+### 9.5 仿真数据的验证方法
+
+启动仿真前先加载环境：
+
+```bash
+source /opt/ros/noetic/setup.bash
+source ~/catkin_ws/devel/setup.bash
+```
+
+如果工程及依赖已经放入工作空间并成功构建，源码给出的入口是：
+
+```bash
+roslaunch smb_gazebo smb_gazebo.launch
+```
+
+本次只完成了源码阅读，没有在本机完成上述工程的依赖安装、构建和运行，因此下面是运行后的验证顺序，不应当写成已经得到的实测结果：
+
+```bash
+rosnode list
+rostopic list | grep -E 'image|camera_info|points|scan|imu|odom|cmd_vel'
+rostopic type /rslidar_points
+rostopic hz /rslidar_points
+rostopic type /imu0
+rostopic hz /imu0
+rqt_graph
+```
+
+接入名为 `front` 的 Blackfly 相机后，可以继续检查：
+
+```bash
+rostopic type /front/color/image_raw
+rostopic hz /front/color/image_raw
+rostopic echo -n 1 /front/color/camera_info
+rqt_image_view /front/color/image_raw
+rosrun tf tf_echo base_link front_optical_link
+```
+
+不要用 `rostopic echo` 长时间打印原始图像，像素数组会迅速刷满终端。图像内容用 `rqt_image_view` 看，频率用 `rostopic hz` 看，连接关系用 `rostopic info` 或 `rqt_graph` 看。
+
+需要离线复现视觉问题时，可以只录关键话题：
+
+```bash
+rosbag record /front/color/image_raw /front/color/camera_info /imu0
+rosbag info 2026-10-31-22-00-00.bag
+rosbag play 2026-10-31-22-00-00.bag
+```
+
+实际生成的 bag 文件名由录制时间决定，执行 `rosbag info` 时应替换成当前目录中的真实文件名。
+
+### 9.6 这份工程暴露出的接口问题
+
+源码阅读中可以发现几处必须核对的接口：
+
+- IMU 插件发布 `/imu0`，但 `localization.yaml` 订阅 `imu/data`；若没有额外 remap，EKF 收不到 IMU；
+- `gazebo_interface.yaml` 写的是 `husky_velocity_controller/odom`，实际控制器配置名是 `smb_velocity_controller`；
+- `gazebo_interface.yaml` 中有一处 `servce` 拼写错误；
+- 相机插件只有宏定义，默认模型没有实例化。
+
+这说明 ROS 工程排错不能只看某一个文件。必须沿着“发布者实际名称—话题名—消息类型—订阅者配置—remap”逐项核对。
+
+### 9.7 视觉仿真的核心意义
+
+Gazebo 中的虚拟相机和实车相机可以向视觉节点提供相同类型的 ROS 图像。只要话题名、消息类型、标定信息和 TF 接口保持一致，识别算法就能在仿真数据、rosbag 回放和真实相机之间切换。
+
+```text
+Gazebo 虚拟传感器 ─┐
+rosbag 回放数据 ───┼→ 同一个视觉节点 → 检测结果 → 解算与控制
+真实相机驱动 ──────┘
+```
+
+因此仿真的主要价值不是让画面看起来像游戏，而是在不上真车的情况下检查接口、坐标系、数据频率和算法流程。
