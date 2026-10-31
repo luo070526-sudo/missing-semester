@@ -409,12 +409,3 @@ ROS 解决数据如何传递，算法解决收到数据后如何计算。
 
 “乌龟不动”时，按节点、话题、类型、数据、订阅端处理的顺序检查，不要直接重装 ROS。
 
-## 参考资料
-
-- [第三课课堂录屏：ROS 架构与通信](https://www.bilibili.com/video/BV1cgxM6fEya/)
-- [线性代数的本质系列](https://www.bilibili.com/video/BV1ys411472E/)
-- [卡尔曼滤波保姆级动画拆解](https://www.bilibili.com/video/BV1Cvpi6eE9q/)
-- [ROS Noetic talker 示例](https://github.com/ros/ros_tutorials/blob/noetic-devel/roscpp_tutorials/talker/talker.cpp)
-- [ROS Noetic listener 示例](https://github.com/ros/ros_tutorials/blob/noetic-devel/roscpp_tutorials/listener/listener.cpp)
-- [turtlesim 运动处理源码](https://github.com/ros/ros_tutorials/blob/noetic-devel/turtlesim/src/turtle.cpp)
-- [ros_control](https://github.com/ros-controls/ros_control/tree/noetic-devel)
