@@ -3,6 +3,8 @@ tags:
   - type/lesson
   - topic/linux
   - topic/git
+  - topic/robomaster
+  - topic/devops
   - status/done
 date: 2026-10-29
 ---
@@ -217,7 +219,7 @@ git merge upstream/master
 
 需要判断两边内容，手动合并并删除标记，再执行 `git add` 和 `git commit`。不能为了消除报错随便删除一边。
 
-## 5. 第一课作业
+## 5. 本课实践与验证
 
 ```text
 2027/luo070526-sudo/
@@ -229,7 +231,7 @@ git merge upstream/master
     └── output.txt
 ```
 
-`system_report.sh` 需要把运行时间、最近 10 条命令和笔记字数重定向到同目录的 `output.txt`。
+`system_report.sh` 把运行时间、最近 10 条命令和笔记字数写入同目录的 `output.txt`。这个练习对应真实工程中的“采集现场信息并留下可复查记录”：脚本是否成功，不能只看终端有没有报错，还要检查退出状态与输出文件内容。
 
 提交前验证：
 
@@ -251,3 +253,130 @@ git diff --check
 - 一次 Commit 只表达一件清楚的事情；
 - PR 收到意见后继续修改原分支，不关闭重开。
 
+## 7. 上车以后，Linux 命令解决什么问题
+
+比赛机器人上的上位机通常没有一直连接显示器。代码部署、启动和排错经常通过 SSH 完成，因此真正需要形成的是“确认状态再操作”的习惯。
+
+### 7.1 远程登录与保持任务
+
+```bash
+ssh dynamicx@192.168.10.10
+hostname
+pwd
+whoami
+```
+
+假设车载电脑地址是 `192.168.10.10`。登录后先确认主机名、用户和目录，避免把命令敲到自己的电脑或另一台机器人上。
+
+网络不稳定时，直接在 SSH 前台运行节点可能因断线而退出。可以使用 `tmux` 保存终端会话：
+
+```bash
+tmux new -s robot
+# 在 tmux 中启动程序
+# 按 Ctrl+B，再按 D，退出但不结束程序
+tmux attach -t robot
+```
+
+`tmux` 只解决会话保持，不等于进程健康。重新连接后仍要检查节点、日志和数据是否正常。
+
+### 7.2 进程、资源与日志
+
+```bash
+pgrep -af ros
+ps -eo pid,stat,%cpu,%mem,cmd --sort=-%cpu | head
+free -h
+df -h
+dmesg --level=err,warn | tail -n 30
+```
+
+| 现象 | 需要思考的原因 |
+| --- | --- |
+| 节点还在，但数据越来越慢 | CPU 被占满、回调阻塞或内存交换 |
+| rosbag 突然停止 | 磁盘空间不足 |
+| 相机或串口偶尔消失 | USB 断连、供电不稳或设备名改变 |
+| 程序反复退出 | 启动参数错误、依赖缺失或硬件未就绪 |
+
+现场日志应同时保留在屏幕和文件中：
+
+```bash
+mkdir -p ~/robot_logs
+roslaunch dx_bringup robot.launch 2>&1 | tee ~/robot_logs/robot_launch.log
+```
+
+`2>&1` 把错误输出合并到标准输出，`tee` 让信息既显示在终端，也写入日志。复盘时应保留第一条错误和发生时间，而不是只截最后一屏。
+
+### 7.3 设备文件与权限
+
+相机、串口和 CAN 适配器接入 Linux 后通常会对应 `/dev` 下的设备文件：
+
+```bash
+lsusb
+ls -l /dev/video*
+ls -l /dev/ttyUSB* /dev/ttyACM*
+dmesg | tail -n 30
+```
+
+常见问题不是“代码突然坏了”，而是设备没有枚举、权限不足或编号变化。例如同一串口可能从 `/dev/ttyUSB0` 变成 `/dev/ttyUSB1`。临时执行 `chmod 777` 会扩大权限且重启后失效，更可靠的做法是用用户组和 udev 规则绑定稳定名称。
+
+## 8. RoboMaster 项目的 Git 工作流
+
+课堂作业只有一个人修改，但战队工程会同时修改视觉、控制、通信和配置。Git 的目标不是“把代码传上去”，而是让每一次改动可审查、可回退、可定位。
+
+### 8.1 不应提交的产物
+
+```gitignore
+build/
+devel/
+logs/
+*.bag
+*.core
+*.o
+```
+
+`build/`、`devel/` 和日志都可以重新生成；bag 文件体积大；崩溃转储可能包含现场数据。真正应提交的是源码、必要配置、launch 文件和能复现实验的说明。
+
+相机标定、PID 等配置可以纳入版本管理，但账号令牌、密码和私人密钥不能提交。若不同机器人参数不同，可以按机器人编号拆分配置文件，而不是每次上车手改同一个文件。
+
+### 8.2 一次可审查的修改
+
+```bash
+git switch -c fix/chassis-command-timeout
+git status
+git diff
+git add src/chassis_node.cpp config/chassis.yaml
+git diff --cached
+git commit -m "Add chassis command timeout protection."
+git push -u origin fix/chassis-command-timeout
+```
+
+分支名说明问题，Commit 说明做了什么，暂存区只放本次相关文件。不要把“调 PID、改通信协议、整理格式”混成一个提交，否则出问题时很难只回退其中一项。
+
+### 8.3 上场版本必须可回退
+
+稳定版本完成整车测试后可以打标签：
+
+```bash
+git tag -a field-test-2026-10-31 -m "Stable field-test build."
+git push origin field-test-2026-10-31
+```
+
+如果赛前新改动导致机器人异常，可以从稳定标签建立修复分支，而不是在未知状态下继续叠加修改：
+
+```bash
+git switch -c hotfix/field-test field-test-2026-10-31
+```
+
+标签只表示代码版本。要真正复现，还要记录系统版本、依赖、参数文件、固件或通信协议版本。
+
+## 9. 真实故障的思考顺序
+
+| 问题 | 先检查 | 不应立即做 |
+| --- | --- | --- |
+| `cd` 提示目录不存在 | `pwd`、`ls`、目录语言和大小写 | 反复复制同一条命令 |
+| 节点启动后立刻退出 | 第一条报错、当前用户、环境变量 | 直接重装 ROS |
+| 设备无法打开 | `/dev`、用户组、`dmesg`、线缆供电 | 长期使用 `chmod 777` |
+| 上车后版本不一致 | `git status`、`git log -1`、标签 | 凭记忆判断版本 |
+| SSH 断开后程序消失 | 前台任务、`tmux`、进程状态 | 只检查网络通不通 |
+| rosbag 把电脑写满 | `df -h`、录制范围和分包策略 | 录制所有话题后不监控 |
+
+真正的排错记录至少包含：现象、复现条件、第一条错误、根因、修改内容和复测结果。这样下次遇到同类问题时，笔记才会变成可重复使用的经验。
