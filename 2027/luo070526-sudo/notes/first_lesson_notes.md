@@ -251,8 +251,3 @@ git diff --check
 - 一次 Commit 只表达一件清楚的事情；
 - PR 收到意见后继续修改原分支，不关闭重开。
 
-## 参考资料
-
-- [27 赛季控制视觉招新培训第一课](https://www.bilibili.com/video/BV1Uwn36PE7c/)
-- [OceanCing/missing-semester](https://github.com/OceanCing/missing-semester)
-- [Pro Git](https://git-scm.com/book/zh/v2)
