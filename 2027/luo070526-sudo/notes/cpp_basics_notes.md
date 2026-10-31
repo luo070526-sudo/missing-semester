@@ -1,3 +1,12 @@
+---
+tags:
+  - type/lesson
+  - topic/cpp
+  - topic/robomaster
+  - status/done
+date: 2026-10-29
+---
+
 # C++ 基础学习笔记
 
 ## 知识点总览
@@ -475,3 +484,212 @@ Visual Studio 2022 和旧版 Dev-C++ 可能使用不同的编译器和语言标�
 4. 在循环中打印 `i`、`j` 等关键变量；
 5. 测试最小值、最大值和重复数据；
 6. 确认无误后再删除临时调试输出。
+
+## 11. 用结构体表达机器人状态
+
+课堂中的 `Student` 结构体用于练习成员访问；在机器人项目中，结构体更重要的作用是把同一时刻、同一含义的数据组织成清楚的接口。
+
+```cpp
+#include <cstdint>
+
+enum class ControlMode
+{
+    Disabled,
+    Manual,
+    AutoAim
+};
+
+struct ChassisState
+{
+    double vx_mps = 0.0;
+    double vy_mps = 0.0;
+    double wz_radps = 0.0;
+    double power_w = 0.0;
+    std::uint64_t stamp_ms = 0;
+};
+
+struct ChassisCommand
+{
+    double vx_mps = 0.0;
+    double vy_mps = 0.0;
+    double wz_radps = 0.0;
+    ControlMode mode = ControlMode::Disabled;
+};
+```
+
+变量名直接写出单位，可以减少“角度还是弧度、秒还是毫秒”的误会。比赛代码经常由不同组共同维护，接口含义不清比语法错误更危险。
+
+只读大对象使用常量引用：
+
+```cpp
+double kineticIndex(const ChassisState& state)
+{
+    return state.vx_mps * state.vx_mps +
+           state.vy_mps * state.vy_mps;
+}
+```
+
+若函数要产生一个新的结果，优先返回值；只有需要明确修改调用者对象时才使用非常量引用。
+
+## 12. 输入有效性、限幅与安全状态
+
+传感器或通信数据可能出现 `NaN`、无穷大、越界值和旧数据。程序“能算”不代表指令可以直接送给电机。
+
+```cpp
+#include <algorithm>
+#include <cmath>
+
+bool isFinite(const ChassisCommand& cmd)
+{
+    return std::isfinite(cmd.vx_mps) &&
+           std::isfinite(cmd.vy_mps) &&
+           std::isfinite(cmd.wz_radps);
+}
+
+ChassisCommand limitCommand(ChassisCommand cmd)
+{
+    if (!isFinite(cmd))
+    {
+        return {};  // 无效数据直接回到零指令和 Disabled
+    }
+
+    cmd.vx_mps = std::clamp(cmd.vx_mps, -1.5, 1.5);
+    cmd.vy_mps = std::clamp(cmd.vy_mps, -1.5, 1.5);
+    cmd.wz_radps = std::clamp(cmd.wz_radps, -4.0, 4.0);
+    return cmd;
+}
+```
+
+这里的数值只是代码示例，真实上限应来自机器人设计、控制参数和当赛季规则。不能为了让机器人“更快”而绕过机械、电气或比赛限制。
+
+RoboMaster 中常见的安全处理包括：
+
+- 遥控、视觉或裁判系统数据超时后进入安全状态；
+- 功率、热量或速度接近限制时平滑降额；
+- 底盘和云台指令做速度、加速度或输出限幅；
+- 失去使能、急停或通信断开时发送零输出；
+- 恢复通信后先重新确认状态，不能直接沿用断线前命令。
+
+## 13. 用单调时钟判断指令是否过期
+
+节点存在不等于数据仍在更新。相机卡住、串口断开或发布线程阻塞时，最后一条指令可能一直留在内存中。
+
+```cpp
+#include <chrono>
+
+using SteadyClock = std::chrono::steady_clock;
+
+bool commandTimedOut(
+    SteadyClock::time_point lastUpdate,
+    std::chrono::milliseconds timeout)
+{
+    return SteadyClock::now() - lastUpdate > timeout;
+}
+```
+
+`steady_clock` 只会单调前进，适合计算时间间隔。系统时间可能被校时，不适合直接用来判断控制超时。
+
+控制循环中的典型逻辑：
+
+```cpp
+ChassisCommand output = latestCommand;
+
+if (commandTimedOut(lastCommandTime, std::chrono::milliseconds(100)))
+{
+    output = {};
+}
+
+output = limitCommand(output);
+sendToMotor(output);
+```
+
+超时时间不能照抄示例，应结合上游发布频率、网络抖动和机器人制动需求，通过测试确定。
+
+## 14. 生命周期与资源管理
+
+真实项目里常见的问题不是“指针不会写”，而是对象已经失效但指针还在使用。
+
+错误示例：
+
+```cpp
+const int& badReference()
+{
+    int value = 10;
+    return value;  // 函数结束后 value 已销毁
+}
+```
+
+更稳妥的原则：
+
+- 局部结果直接按值返回；
+- 数量固定的数据使用 `std::array`；
+- 数量变化的数据使用 `std::vector`；
+- 资源所有权明确时使用对象或智能指针；
+- 不在高频控制循环里反复 `new`、`delete` 或扩容容器；
+- 文件、锁和设备句柄使用 RAII，让对象离开作用域时自动释放。
+
+访问数组或容器时必须保证下标合法。传感器数量、装甲板编号和电机 ID 来自外部输入时，先检查范围再索引。
+
+## 15. 多线程与回调中的共享数据
+
+ROS 使用多线程回调或算法线程与控制线程并行时，同一份状态可能被同时读写，形成数据竞争。一个简单做法是加锁更新，并让控制线程迅速复制快照：
+
+```cpp
+#include <mutex>
+
+class SharedTarget
+{
+public:
+    void update(double yawRad)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        yawRad_ = yawRad;
+        valid_ = true;
+    }
+
+    bool snapshot(double& yawRad) const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        yawRad = yawRad_;
+        return valid_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    double yawRad_ = 0.0;
+    bool valid_ = false;
+};
+```
+
+锁内只复制少量数据，不在锁内做图像推理、磁盘写入或网络等待。否则一个慢回调可能把整个控制链路拖住。
+
+## 16. 数值与控制程序中的常见陷阱
+
+| 问题 | 后果 | 检查方法 |
+| --- | --- | --- |
+| 整数相除 | `1 / 2` 得到 `0` | 至少一个操作数转成 `double` |
+| 度与弧度混用 | 云台转向比例错误 | 变量名带 `_deg` 或 `_rad` |
+| 毫秒与秒混用 | 超时提前或延后 1000 倍 | 单位写进变量名或使用 `chrono` |
+| 正负方向不一致 | 控制器越修正误差越大 | 小幅手动输入验证坐标方向 |
+| `dt` 为零或过大 | 微分项异常、积分跳变 | 检查时间间隔并设置合理范围 |
+| 未初始化变量 | 偶发错误且难以复现 | 定义时初始化，开启警告 |
+| `NaN` 继续传播 | 所有后续输出都变成 `NaN` | 入口处使用 `std::isfinite` |
+
+## 17. 从“能运行”到“可以上车”
+
+建议至少用下面的编译选项暴露可疑代码：
+
+```bash
+g++ -std=c++17 -Wall -Wextra -Wpedantic main.cpp -o main
+```
+
+测试应覆盖：
+
+1. 正常输入；
+2. 边界值和零值；
+3. 负值、超范围值、`NaN` 与无穷大；
+4. 数据超时和断线恢复；
+5. 重复启动、正常退出和资源释放；
+6. Debug 与优化构建下结果是否一致。
+
+比赛现场的程序还要回答：输入来自哪里、多久更新一次、失效后怎么办、输出上限是什么、怎样确认命令真的送到执行端。只有这些问题都有明确答案，代码才从练习题变成可上车模块。
