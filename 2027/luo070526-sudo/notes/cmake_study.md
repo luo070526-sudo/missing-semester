@@ -3,6 +3,8 @@ tags:
   - type/lesson
   - topic/cmake
   - topic/catkin
+  - topic/robomaster
+  - topic/testing
   - status/done
 date: 2026-10-29
 ---
@@ -345,7 +347,7 @@ if (!std::isfinite(leftWheel) || !std::isfinite(rightWheel) ||
 
 AI 适合解释报错和补充边界情况，但最终应以 `pwd`、`ls`、编译输出、CTest 结果和 ROS 消息为准。不能把 AI 环境通过写成本机已经完成。
 
-## 7. 固定排错顺序
+## 7. 基础排错顺序
 
 1. 用 `pwd` 确认所在目录；
 2. 用 `ls`、`find` 确认文件存在；
@@ -356,3 +358,176 @@ AI 适合解释报错和补充边界情况，但最终应以 `pwd`、`ls`、编�
 7. ROS 包找不到时检查依赖和 `source`；
 8. 构建成功后仍要运行目标并检查输出。
 
+## 8. 从练习工程到战队工程
+
+单个差速底盘程序只需要一个库和一个可执行文件，但整车工程会同时包含消息接口、视觉、控制、硬件通信和启动配置。拆包的依据应是职责与依赖，而不是文件数量。
+
+一个可能的结构是：
+
+| 功能包 | 职责 | 不应包含 |
+| --- | --- | --- |
+| `dx_msgs` | 自定义消息和服务 | 控制算法与硬件代码 |
+| `dx_vision` | 图像输入、识别与目标解算 | 电机收发 |
+| `dx_control` | 底盘、云台控制器与安全限制 | 相机驱动 |
+| `dx_hardware` | EtherCAT、CAN、串口和设备状态 | 战术决策 |
+| `dx_bringup` | launch、YAML 和整车启动入口 | 大量算法实现 |
+
+这样做的意义是：视觉算法变化时不必重新理解 CAN 代码，更换硬件时也不必重写控制器。包之间通过明确的消息和库接口协作。
+
+### 8.1 以目标为中心写 CMake
+
+```cmake
+add_library(dx_kinematics src/diff_drive.cpp)
+target_compile_features(dx_kinematics PUBLIC cxx_std_17)
+target_compile_options(dx_kinematics PRIVATE
+  -Wall
+  -Wextra
+  -Wpedantic
+)
+target_include_directories(dx_kinematics
+  PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+add_executable(chassis_node src/chassis_node.cpp)
+target_link_libraries(chassis_node
+  PRIVATE
+    dx_kinematics
+    ${catkin_LIBRARIES}
+)
+```
+
+`PUBLIC` 表示依赖既用于当前目标，也需要传递给使用该库的目标；`PRIVATE` 只影响当前目标。按目标设置头文件、编译选项和链接库，比全局堆在 `include_directories` 或 `CMAKE_CXX_FLAGS` 中更容易定位依赖。
+
+警告选项先用于自己维护的目标。不要轻易把整个工作空间都设成 `-Werror`，第三方包的一个警告可能导致全部构建失败。
+
+### 8.2 自定义消息的构建顺序
+
+如果节点使用本包生成的消息，需要让可执行目标等待消息头文件生成：
+
+```cmake
+add_executable(target_solver src/target_solver.cpp)
+add_dependencies(target_solver
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
+  ${catkin_EXPORTED_TARGETS}
+)
+target_link_libraries(target_solver ${catkin_LIBRARIES})
+```
+
+出现“偶尔第一次编译找不到消息头、再编一次又成功”时，应先检查依赖顺序，而不是把重复编译当作正常流程。
+
+## 9. Debug、Release 与可诊断性
+
+### 9.1 构建类型
+
+```bash
+cd ~/catkin_ws
+catkin_make -DCMAKE_BUILD_TYPE=RelWithDebInfo
+```
+
+`Debug` 便于单步调试，但速度可能明显低于比赛构建；`Release` 优化较强，但现场崩溃时缺少调试信息；`RelWithDebInfo` 同时保留优化和符号，适合作为整车测试阶段的选择。
+
+优化后才出现的错误通常暴露了未初始化变量、越界、生命周期或数据竞争问题，不能简单归因于“编译器优化有 bug”。
+
+### 9.2 用 Sanitizer 找内存与未定义行为
+
+在练习工程或离线测试环境中可以单独建立检查构建：
+
+```bash
+cmake -S . -B build-sanitize \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+cmake --build build-sanitize
+ctest --test-dir build-sanitize --output-on-failure
+```
+
+Sanitizer 会降低性能，不应不经测试直接用于比赛运行版本。它的作用是在上车前暴露越界、释放后使用和未定义行为。
+
+## 10. 测试不只检查一个公式
+
+差速运动学的单元测试验证数学函数；整车还需要逐层验证：
+
+| 层级 | 示例 | 证明什么 |
+| --- | --- | --- |
+| 单元测试 | 左右轮速度换算 | 算法边界和符号正确 |
+| 节点测试 | 发布一条速度消息 | 节点能接收、计算和发布 |
+| 接口测试 | 检查 Topic 类型和频率 | 上下游契约一致 |
+| 集成测试 | 启动控制器和仿真底盘 | launch、参数和依赖能协同 |
+| 故障测试 | 停止上游或断开设备 | 超时与安全状态生效 |
+
+CTest 与 Catkin 测试：
+
+```bash
+ctest --test-dir cmake_build --output-on-failure
+cd ~/catkin_ws
+catkin_make run_tests
+catkin_test_results
+```
+
+只写测试文件但不执行、只看到编译成功但不检查返回值，都不能算验证完成。测试失败时先保存第一个失败用例和输入数据。
+
+## 11. 安装与上车部署
+
+开发空间中的 `devel/` 适合本机迭代，整车部署更需要明确哪些程序和配置必须随包安装：
+
+```cmake
+install(TARGETS chassis_node dx_kinematics
+  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+install(DIRECTORY launch config
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)
+```
+
+安装验证：
+
+```bash
+cd ~/catkin_ws
+catkin_make install
+source install/setup.bash
+rospack find dx_bringup
+roslaunch dx_bringup robot.launch
+```
+
+如果只在 `devel/` 环境能运行，换电脑或清理工作空间后失败，通常说明安装规则、运行依赖或资源路径不完整。
+
+部署时还要记录：
+
+- Git Commit 或稳定标签；
+- Ubuntu、ROS 和编译器版本；
+- 第三方库版本；
+- 实际使用的 YAML 与 launch；
+- 下位机固件和通信协议版本。
+
+代码一致而参数或协议不一致，机器人表现仍可能完全不同。
+
+## 12. RoboMaster 工程中的常见构建故障
+
+| 现象 | 可能原因 | 检查方法 |
+| --- | --- | --- |
+| 找不到包 | 工作空间未编译或 `source` 顺序错误 | `echo $CMAKE_PREFIX_PATH`、`rospack find` |
+| 找不到头文件 | include 路径、依赖声明或生成顺序错误 | 查看完整编译命令和目标依赖 |
+| `undefined reference` | 只有声明没有实现，或忘记链接库 | `target_link_libraries`、`nm` |
+| 运行时找不到 `.so` | 库未安装或环境未加载 | `ldd`、`LD_LIBRARY_PATH` |
+| 修改代码但行为没变 | 运行了旧工作空间中的同名节点 | `which`、`rospack find`、`rosnode info` |
+| Debug 正常、Release 异常 | 未初始化、越界或数据竞争 | 警告、Sanitizer、最小复现 |
+| 清空 build 后失败 | 之前依赖了缓存或未声明的系统环境 | 从干净工作空间重建 |
+| 一台车能编译，另一台不行 | 依赖和系统版本漂移 | 比较版本与安装清单 |
+
+不要同时对同一工作空间混用 `catkin_make` 和 `catkin build`。两者的目录布局和缓存不同，混用会让错误来源变得不清楚。
+
+## 13. 上车前的构建验收
+
+1. 从干净目录完成一次完整构建；
+2. 编译警告已经阅读，不能只把输出滚过去；
+3. 单元测试、节点测试与故障测试通过；
+4. `source` 新环境后仍能 `rospack find` 和 `roslaunch`；
+5. 运行中的节点来自预期工作空间；
+6. 配置、模型和 launch 已纳入版本管理；
+7. 稳定 Commit、依赖、固件与协议版本有记录；
+8. 新版本异常时有明确回退方案。
+
+CMake 和 Catkin 的价值不是替人少敲几条编译命令，而是把依赖、生成顺序、测试和部署过程写成可重复执行的工程规则。
