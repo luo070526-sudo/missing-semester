@@ -12,6 +12,8 @@ date: 2026-10-29
 
 # 第三课：ROS 架构与通信
 
+本文所有 ROS 节点、算法与控制逻辑示例统一使用 C++ 和 roscpp；YAML、XML/Launch、CMake、Catkin、MATLAB 与 Linux 命令只用于配置、构建、分析和运行。
+
 ROS 解决的是“多个机器人程序如何分工并交换数据”。本课用 turtlesim 串起节点、话题、消息、服务、参数和 Catkin。
 
 ```text
